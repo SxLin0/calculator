@@ -1,242 +1,507 @@
-// DOM 元素
-const exprInput = document.getElementById('expr');
-const resultInput = document.getElementById('result');
+(function (root) {
+  'use strict';
 
-// 状态变量
-let currentExpr = '';      // 当前表达式（显示在上方）
-let lastResult = '';        // 上一次计算结果（用于连续运算）
-let lastExpr = '';         // 最近一次计算的表达式（用于展示）
+  const MAX_HISTORY = 6;
+  const DISPLAY_PRECISION = 12;
+  const OPERATORS = {
+    '+': { precedence: 1, fn: (a, b) => a + b },
+    '-': { precedence: 1, fn: (a, b) => a - b },
+    '*': { precedence: 2, fn: (a, b) => a * b },
+    '/': {
+      precedence: 2,
+      fn: (a, b) => {
+        if (b === 0) throw new Error('除数不能为 0');
+        return a / b;
+      },
+    },
+  };
 
-// 更新显示
-function updateDisplay(exprOverride, resultOverride) {
-    const exprText = exprOverride !== undefined
-        ? exprOverride
-        : (currentExpr || (lastExpr ? `${lastExpr}=` : '0'));
+  function normalizeNumber(value) {
+    if (!Number.isFinite(value)) throw new Error('结果无效');
+    if (Object.is(value, -0)) return 0;
+    return Number(value.toPrecision(DISPLAY_PRECISION));
+  }
 
-    const resultText = resultOverride !== undefined
-        ? resultOverride
-        : (lastResult || '0');
+  function formatNumber(value) {
+    const normalized = normalizeNumber(value);
+    if (Number.isInteger(normalized)) return String(normalized);
+    return String(normalized).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+  }
 
-    exprInput.value = exprText;
-    resultInput.value = resultText;
-}
+  function createResult(value, expression) {
+    const normalized = normalizeNumber(value);
+    return {
+      value: normalized,
+      display: formatNumber(normalized),
+      expression,
+    };
+  }
 
-// 移除末尾无效字符（运算符或孤立的小数点）
-function sanitizeExpr(expr) {
-    return expr.replace(/[\+\-\*\/\.]+$/g, '');
-}
+  function isDigit(char) {
+    return char >= '0' && char <= '9';
+  }
 
-// 处理数字或小数点
-function handleNumber(value) {
-    // 如果已有结果且未输入新运算符，则开始新的输入
-    if (lastResult !== '' && currentExpr === '') {
-        currentExpr = '';
-        lastExpr = '';
-        lastResult = '';
+  function tokenize(expression) {
+    const tokens = [];
+    let i = 0;
+    let expectingValue = true;
+
+    while (i < expression.length) {
+      const char = expression[i];
+
+      if (/\s/.test(char)) {
+        i += 1;
+        continue;
+      }
+
+      if (isDigit(char) || char === '.' || ((char === '-' || char === '+') && expectingValue)) {
+        const sign = char === '-' ? -1 : 1;
+        if (char === '-' || char === '+') i += 1;
+
+        if (expression[i] === '(' && sign === -1) {
+          tokens.push({ type: 'number', value: 0 });
+          tokens.push({ type: 'operator', value: '-' });
+          expectingValue = true;
+          continue;
+        }
+
+        let number = '';
+        let dots = 0;
+        while (i < expression.length && (isDigit(expression[i]) || expression[i] === '.')) {
+          if (expression[i] === '.') dots += 1;
+          if (dots > 1) throw new Error('数字格式不正确');
+          number += expression[i];
+          i += 1;
+        }
+
+        if (number === '' || number === '.') throw new Error('表达式不完整');
+        tokens.push({ type: 'number', value: sign * Number(number) });
+        expectingValue = false;
+        continue;
+      }
+
+      if (char in OPERATORS) {
+        if (expectingValue) throw new Error('表达式不完整');
+        tokens.push({ type: 'operator', value: char });
+        expectingValue = true;
+        i += 1;
+        continue;
+      }
+
+      if (char === '(') {
+        tokens.push({ type: 'leftParen', value: char });
+        expectingValue = true;
+        i += 1;
+        continue;
+      }
+
+      if (char === ')') {
+        if (expectingValue) throw new Error('表达式不完整');
+        tokens.push({ type: 'rightParen', value: char });
+        expectingValue = false;
+        i += 1;
+        continue;
+      }
+
+      if (char === '%') {
+        if (expectingValue) throw new Error('百分号位置不正确');
+        tokens.push({ type: 'percent', value: char });
+        i += 1;
+        continue;
+      }
+
+      throw new Error('包含不支持的字符');
     }
 
-    // 防止同一数字块重复输入多个小数点
-    if (value === '.') {
-        const parts = currentExpr.split(/[\+\-\*\/]/);
-        const lastPart = parts[parts.length - 1];
-        if (lastPart.includes('.')) return;
-        if (lastPart === '') currentExpr += '0';
-    }
+    return tokens;
+  }
 
-    currentExpr += value;
-    updateDisplay();
-}
+  function toRpn(tokens) {
+    const output = [];
+    const stack = [];
 
-// 处理运算符
-function handleOperator(op) {
-    // 如果表达式为空，但存在上次结果，则用上次结果作为第一个操作数
-    if (currentExpr === '' && lastResult !== '') {
-        currentExpr = lastResult;
-        lastResult = '';
-        lastExpr = '';
-    }
-    // 首个输入不能是运算符
-    if (currentExpr === '') return;
-    // 防止连续输入运算符：如果最后一位已经是运算符，则替换
-    if (/[\+\-\*\/]$/.test(currentExpr)) {
-        currentExpr = currentExpr.slice(0, -1) + op;
-    } else {
-        currentExpr += op;
-    }
-    updateDisplay();
-}
-
-// 计算结果
-function calculate() {
-    if (currentExpr === '' && lastResult !== '') {
-        // 没有新表达式时直接展示上一结果
-        updateDisplay(lastExpr ? `${lastExpr}=` : '0', lastResult);
+    tokens.forEach((token) => {
+      if (token.type === 'number' || token.type === 'percent') {
+        output.push(token);
         return;
-    }
-    if (currentExpr === '') return;
+      }
 
-    try {
-        const exprToEval = sanitizeExpr(currentExpr);
-        if (exprToEval === '') return;
+      if (token.type === 'operator') {
+        while (stack.length) {
+          const top = stack[stack.length - 1];
+          if (top.type !== 'operator') break;
+          if (OPERATORS[top.value].precedence < OPERATORS[token.value].precedence) break;
+          output.push(stack.pop());
+        }
+        stack.push(token);
+        return;
+      }
 
-        // 使用 eval 计算表达式（按钮已限制字符）
-        let result = eval(exprToEval);
+      if (token.type === 'leftParen') {
+        stack.push(token);
+        return;
+      }
 
-        if (!isFinite(result)) throw new Error('Invalid result');
-
-        // 处理浮点数精度
-        if (Math.abs(result) % 1 !== 0) {
-            result = parseFloat(result.toFixed(10));
+      if (token.type === 'rightParen') {
+        while (stack.length && stack[stack.length - 1].type !== 'leftParen') {
+          output.push(stack.pop());
         }
-        lastResult = result.toString();
-        lastExpr = exprToEval;
-        // 清空 currentExpr 表示新开始
-        currentExpr = '';
-        updateDisplay(`${lastExpr}=`, lastResult);
-    } catch (err) {
-        currentExpr = '';
-        lastResult = '';
-        lastExpr = '';
-        updateDisplay('错误', '错误');
-    }
-}
-
-// 清除所有
-function clearAll() {
-    currentExpr = '';
-    lastResult = '';
-    lastExpr = '';
-    updateDisplay();
-}
-
-// 退格
-function backspace() {
-    if (currentExpr !== '') {
-        currentExpr = currentExpr.slice(0, -1);
-        updateDisplay();
-    }
-}
-
-// 平方
-function square() {
-    const targetExpr = currentExpr || lastResult;
-    if (targetExpr !== '') {
-        try {
-            const exprToEval = sanitizeExpr(targetExpr);
-            if (exprToEval === '') return;
-            let val = eval(exprToEval);
-            let result = val * val;
-            if (!isFinite(result)) throw new Error('Invalid result');
-            if (Math.abs(result) % 1 !== 0) {
-                result = parseFloat(result.toFixed(10));
-            }
-            lastResult = result.toString();
-            lastExpr = `${exprToEval}²`;
-            currentExpr = '';
-            updateDisplay(`${lastExpr}=`, lastResult);
-        } catch (err) {
-            currentExpr = '';
-            lastResult = '';
-            lastExpr = '';
-            updateDisplay('错误', '错误');
-        }
-    }
-}
-
-// 正负号
-function negate() {
-    const targetExpr = currentExpr || lastResult;
-    if (targetExpr !== '') {
-        try {
-            const exprToEval = sanitizeExpr(targetExpr);
-            if (exprToEval === '') return;
-            let val = eval(exprToEval);
-            let result = -val;
-            if (Math.abs(result) % 1 !== 0) {
-                result = parseFloat(result.toFixed(10));
-            }
-            lastResult = result.toString();
-            lastExpr = `${exprToEval}±`;
-            currentExpr = '';
-            updateDisplay(`${lastExpr}=`, lastResult);
-        } catch (err) {
-            currentExpr = '';
-            lastResult = '';
-            lastExpr = '';
-            updateDisplay('错误', '错误');
-        }
-    }
-}
-
-// 绑定按钮事件
-document.querySelectorAll('button').forEach(btn => {
-    btn.addEventListener('click', () => {
-        // 数字或小数点
-        if (btn.hasAttribute('data-value')) {
-            handleNumber(btn.getAttribute('data-value'));
-        }
-        // 运算符
-        else if (btn.hasAttribute('data-op')) {
-            handleOperator(btn.getAttribute('data-op'));
-        }
-        // 等号
-        else if (btn.id === 'equal') {
-            calculate();
-        }
-        // 清除
-        else if (btn.id === 'clear') {
-            clearAll();
-        }
-        // 退格
-        else if (btn.id === 'backspace') {
-            backspace();
-        }
-        // 功能按钮
-        else if (btn.hasAttribute('data-func')) {
-            const func = btn.getAttribute('data-func');
-            if (func === 'square') square();
-            else if (func === 'negate') negate();
-        }
+        if (!stack.length) throw new Error('括号不匹配');
+        stack.pop();
+      }
     });
-});
 
-// 键盘支持
-document.body.addEventListener('keydown', (e) => {
-    const key = e.key;
-    // 数字 0-9
-    if (/^[0-9]$/.test(key)) {
-        e.preventDefault();
-        handleNumber(key);
+    while (stack.length) {
+      const token = stack.pop();
+      if (token.type === 'leftParen' || token.type === 'rightParen') throw new Error('括号不匹配');
+      output.push(token);
     }
-    // 小数点
-    else if (key === '.') {
-        e.preventDefault();
-        handleNumber('.');
+
+    return output;
+  }
+
+  function evaluateRpn(tokens) {
+    const stack = [];
+
+    tokens.forEach((token) => {
+      if (token.type === 'number') {
+        stack.push(token.value);
+        return;
+      }
+
+      if (token.type === 'percent') {
+        if (!stack.length) throw new Error('百分号位置不正确');
+        stack.push(stack.pop() / 100);
+        return;
+      }
+
+      if (token.type === 'operator') {
+        if (stack.length < 2) throw new Error('表达式不完整');
+        const b = stack.pop();
+        const a = stack.pop();
+        stack.push(OPERATORS[token.value].fn(a, b));
+      }
+    });
+
+    if (stack.length !== 1) throw new Error('表达式不完整');
+    return normalizeNumber(stack[0]);
+  }
+
+  const CalculatorEngine = {
+    evaluate(expression) {
+      const cleanExpression = String(expression || '').trim();
+      if (!cleanExpression) throw new Error('请输入表达式');
+      const tokens = tokenize(cleanExpression);
+      if (!tokens.length) throw new Error('请输入表达式');
+      const last = tokens[tokens.length - 1];
+      if (last.type === 'operator' || last.type === 'leftParen') throw new Error('表达式不完整');
+      return createResult(evaluateRpn(toRpn(tokens)), cleanExpression);
+    },
+
+    square(expression) {
+      const result = this.evaluate(expression);
+      return createResult(result.value * result.value, `sqr(${result.display})`);
+    },
+
+    sqrt(expression) {
+      const result = this.evaluate(expression);
+      if (result.value < 0) throw new Error('不能对负数开平方');
+      return createResult(Math.sqrt(result.value), `sqrt(${result.display})`);
+    },
+
+    reciprocal(expression) {
+      const result = this.evaluate(expression);
+      if (result.value === 0) throw new Error('除数不能为 0');
+      return createResult(1 / result.value, `1/(${result.display})`);
+    },
+
+    toggleSign(expression) {
+      const result = this.evaluate(expression);
+      return createResult(-result.value, `negate(${result.display})`);
+    },
+
+    formatNumber,
+  };
+
+  function createCalculatorApp(engine, documentRef) {
+    const displayExpression = documentRef.querySelector('[data-display-expression]');
+    const displayValue = documentRef.querySelector('[data-display-value]');
+    const statusText = documentRef.querySelector('[data-status]');
+    const historyList = documentRef.querySelector('[data-history]');
+    const buttons = Array.from(documentRef.querySelectorAll('[data-action]'));
+
+    const state = {
+      expression: '',
+      result: '0',
+      status: '准备就绪',
+      error: false,
+      history: [],
+      justCalculated: false,
+    };
+
+    function readableExpression(expression) {
+      return expression
+        .replace(/\*/g, '×')
+        .replace(/\//g, '÷')
+        .replace(/sqrt/g, '√');
     }
-    // 运算符
-    else if (key === '+' || key === '-' || key === '*' || key === '/') {
-        e.preventDefault();
-        let op = key;
-        if (key === '*') op = '*';
-        if (key === '/') op = '/';
-        handleOperator(op);
+
+    function setError(error) {
+      state.expression = '';
+      state.result = '错误';
+      state.status = error.message || '表达式无效';
+      state.error = true;
+      state.justCalculated = false;
+      render();
     }
-    // 回车或等号
-    else if (key === 'Enter' || key === '=') {
-        e.preventDefault();
+
+    function getTargetExpression() {
+      return state.expression || (state.result !== '错误' ? state.result : '');
+    }
+
+    function resetAfterErrorOrResult() {
+      if (state.error || state.justCalculated) {
+        state.expression = '';
+        state.result = '0';
+        state.status = '准备就绪';
+        state.error = false;
+        state.justCalculated = false;
+      }
+    }
+
+    function appendNumber(value) {
+      resetAfterErrorOrResult();
+      const parts = state.expression.split(/[+\-*/()]/);
+      const current = parts[parts.length - 1];
+      if (value === '.' && current.includes('.')) return;
+      if (value === '.' && (state.expression === '' || /[+\-*/(]$/.test(state.expression))) {
+        state.expression += '0';
+      }
+      state.expression += value;
+      state.status = '输入中';
+      render();
+    }
+
+    function appendOperator(operator) {
+      if (state.error) resetAfterErrorOrResult();
+      if (state.justCalculated) {
+        state.expression = state.result;
+        state.justCalculated = false;
+      }
+      if (!state.expression && state.result !== '0') state.expression = state.result;
+      if (!state.expression) return;
+      if (/[+\-*/]$/.test(state.expression)) {
+        state.expression = state.expression.slice(0, -1) + operator;
+      } else {
+        state.expression += operator;
+      }
+      state.status = '选择运算符';
+      render();
+    }
+
+    function appendToken(token) {
+      resetAfterErrorOrResult();
+      if (token === '(' && /[\d.)%]$/.test(state.expression)) return;
+      if (token === ')') {
+        const openCount = (state.expression.match(/\(/g) || []).length;
+        const closeCount = (state.expression.match(/\)/g) || []).length;
+        if (openCount <= closeCount || /[+\-*/(]$/.test(state.expression)) return;
+      }
+      state.expression += token;
+      state.status = '输入中';
+      render();
+    }
+
+    function addPercent() {
+      if (state.error) resetAfterErrorOrResult();
+      if (state.justCalculated) {
+        state.expression = state.result;
+        state.justCalculated = false;
+      }
+      if (!state.expression || /[+\-*/(]$/.test(state.expression)) return;
+      state.expression += '%';
+      state.status = '百分比';
+      render();
+    }
+
+    function calculate() {
+      const target = getTargetExpression();
+      if (!target) return;
+      try {
+        const output = engine.evaluate(target);
+        state.result = output.display;
+        state.expression = '';
+        state.status = `${readableExpression(output.expression)} =`;
+        state.error = false;
+        state.justCalculated = true;
+        state.history.unshift({ expression: readableExpression(output.expression), result: output.display });
+        state.history = state.history.slice(0, MAX_HISTORY);
+        render();
+      } catch (error) {
+        setError(error);
+      }
+    }
+
+    function runFunction(name) {
+      const target = getTargetExpression();
+      if (!target) return;
+      try {
+        const output = engine[name](target);
+        state.result = output.display;
+        state.expression = '';
+        state.status = `${readableExpression(output.expression)} =`;
+        state.error = false;
+        state.justCalculated = true;
+        state.history.unshift({ expression: readableExpression(output.expression), result: output.display });
+        state.history = state.history.slice(0, MAX_HISTORY);
+        render();
+      } catch (error) {
+        setError(error);
+      }
+    }
+
+    function clearAll() {
+      state.expression = '';
+      state.result = '0';
+      state.status = '准备就绪';
+      state.error = false;
+      state.justCalculated = false;
+      render();
+    }
+
+    function clearEntry() {
+      if (state.expression) {
+        const trimmed = state.expression.replace(/(\d+\.?\d*|\.\d+)%?$/, '');
+        state.expression = trimmed === state.expression ? state.expression.slice(0, -1) : trimmed;
+      } else {
+        state.result = '0';
+      }
+      state.status = '已清除当前输入';
+      state.error = false;
+      state.justCalculated = false;
+      render();
+    }
+
+    function backspace() {
+      if (state.error || state.justCalculated) {
+        clearEntry();
+        return;
+      }
+      state.expression = state.expression.slice(0, -1);
+      state.status = state.expression ? '输入中' : '准备就绪';
+      render();
+    }
+
+    function useHistory(index) {
+      const item = state.history[index];
+      if (!item) return;
+      state.expression = '';
+      state.result = item.result;
+      state.status = `${item.expression} =`;
+      state.error = false;
+      state.justCalculated = true;
+      render();
+    }
+
+    function handleAction(action, value) {
+      if (action === 'number') appendNumber(value);
+      if (action === 'operator') appendOperator(value);
+      if (action === 'token') appendToken(value);
+      if (action === 'percent') addPercent();
+      if (action === 'equals') calculate();
+      if (action === 'clear-all') clearAll();
+      if (action === 'clear-entry') clearEntry();
+      if (action === 'backspace') backspace();
+      if (action === 'square') runFunction('square');
+      if (action === 'sqrt') runFunction('sqrt');
+      if (action === 'reciprocal') runFunction('reciprocal');
+      if (action === 'sign') runFunction('toggleSign');
+    }
+
+    function handleKeyboard(event) {
+      const key = event.key;
+      if (/^[0-9]$/.test(key) || key === '.') {
+        event.preventDefault();
+        appendNumber(key);
+        return;
+      }
+      if (['+', '-', '*', '/'].includes(key)) {
+        event.preventDefault();
+        appendOperator(key);
+        return;
+      }
+      if (key === '(' || key === ')') {
+        event.preventDefault();
+        appendToken(key);
+        return;
+      }
+      if (key === '%') {
+        event.preventDefault();
+        addPercent();
+        return;
+      }
+      if (key === 'Enter' || key === '=') {
+        event.preventDefault();
         calculate();
-    }
-    // 退格
-    else if (key === 'Backspace') {
-        e.preventDefault();
+        return;
+      }
+      if (key === 'Backspace') {
+        event.preventDefault();
         backspace();
-    }
-    // ESC 或 c 清除
-    else if (key === 'Escape' || key === 'c' || key === 'C') {
-        e.preventDefault();
+        return;
+      }
+      if (key === 'Delete') {
+        event.preventDefault();
+        clearEntry();
+        return;
+      }
+      if (key === 'Escape' || key.toLowerCase() === 'c') {
+        event.preventDefault();
         clearAll();
+      }
     }
-});
 
-// 初始化显示
-updateDisplay();
+    function render() {
+      displayExpression.textContent = state.status;
+      displayValue.textContent = state.expression
+        ? readableExpression(state.expression)
+        : state.result;
+      statusText.textContent = state.status;
+      historyList.innerHTML = '';
+
+      if (!state.history.length) {
+        const empty = documentRef.createElement('li');
+        empty.className = 'history-empty';
+        empty.textContent = '暂无历史记录';
+        historyList.appendChild(empty);
+      } else {
+        state.history.forEach((item, index) => {
+          const li = documentRef.createElement('li');
+          const button = documentRef.createElement('button');
+          button.type = 'button';
+          button.className = 'history-item';
+          button.addEventListener('click', () => useHistory(index));
+          button.innerHTML = `<span>${item.expression}</span><strong>${item.result}</strong>`;
+          li.appendChild(button);
+          historyList.appendChild(li);
+        });
+      }
+    }
+
+    buttons.forEach((button) => {
+      button.addEventListener('click', () => handleAction(button.dataset.action, button.dataset.value));
+    });
+    documentRef.addEventListener('keydown', handleKeyboard);
+    render();
+  }
+
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { CalculatorEngine };
+  }
+
+  if (typeof document !== 'undefined') {
+    document.addEventListener('DOMContentLoaded', () => createCalculatorApp(CalculatorEngine, document));
+  }
+
+  root.CalculatorEngine = CalculatorEngine;
+})(typeof globalThis !== 'undefined' ? globalThis : window);
