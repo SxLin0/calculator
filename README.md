@@ -45,4 +45,6 @@ node --test tests/calculator.test.js
 - 移动端可用，建议竖屏体验。
 
 ## 许可证
-MIT
+
+本项目基于 MIT License 开源，详见 [LICENSE](LICENSE)。
+
